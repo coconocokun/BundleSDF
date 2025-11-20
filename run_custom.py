@@ -66,7 +66,7 @@ def run_one_video(video_dir='/home/bowen/debug/2022-11-18-15-10-24_milk', out_fo
 
   tracker = BundleSdf(cfg_track_dir=cfg_track_dir, cfg_nerf_dir=cfg_nerf_dir, start_nerf_keyframes=5, use_gui=use_gui)
 
-  reader = YcbineoatReader(video_dir=video_dir, shorter_side=480)
+  reader = YcbineoatReader(video_dir=video_dir, shorter_side=360)
 
 
   for i in range(0,len(reader.color_files),args.stride):
@@ -210,8 +210,8 @@ def draw_pose():
 if __name__=="__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument('--mode', type=str, default="run_video", help="run_video/global_refine/draw_pose")
-  parser.add_argument('--video_dir', type=str, default="/home/bowen/debug/2022-11-18-15-10-24_milk/")
-  parser.add_argument('--out_folder', type=str, default="/home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk")
+  parser.add_argument('--video_dir', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/milk")
+  parser.add_argument('--out_folder', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/results_milk")
   parser.add_argument('--use_segmenter', type=int, default=0)
   parser.add_argument('--use_gui', type=int, default=1)
   parser.add_argument('--stride', type=int, default=1, help='interval of frames to run; 1 means using every frame')
