@@ -13,6 +13,7 @@ import os,sys
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
 from segmentation_utils import Segmenter
+from scipy.spatial.transform import Rotation as R
 
 
 def run_one_video(video_dir='/home/bowen/debug/2022-11-18-15-10-24_milk', out_folder='/home/bowen/debug/bundlesdf_2022-11-18-15-10-24_milk/', use_segmenter=False, use_gui=False):
@@ -204,6 +205,54 @@ def draw_pose():
     vis = draw_posed_3d_box(K, color, ob_in_cam=pose, bbox=bbox, line_color=(255,255,0))
     id_str = os.path.basename(color_file).replace('.png','')
     imageio.imwrite(f'{out_dir}/{id_str}.png', vis)
+
+
+def extract_pose_diff():
+  """
+  Reads absolute pose data, calculates relative pose differences between consecutive frames, and saves them in 4x4 matrix format
+  and 6D vector format (x, y, z, roll, pitch, yaw).
+  """
+  # defines path
+  pose_dir = f'{args.out_folder}/ob_in_cam'
+  diff_out_dir = f'{args.out_folder}/pose_diff'
+  diff_6d_out_dir = f'{args.out_folder}/pose_diff_6d'
+  
+  # create output directories
+  os.makedirs(diff_out_dir, exist_ok=True)
+  os.makedirs(diff_6d_out_dir, exist_ok=True)
+  
+  # get sorted list of pose files
+  pose_files = sorted(glob.glob(f'{pose_dir}/*.txt'))
+  
+  print(f"Calculating pose differences and saving to {diff_out_dir} and {diff_6d_out_dir}")
+
+  prev_pose = None
+  for pose_file in pose_files:
+    # load current absolute pose (4x4 matrix)
+    curr_pose = np.loadtxt(pose_file)
+    
+    # calculate relative pose difference if previous pose exists
+    if prev_pose is None:
+      # first frame, no previous pose -> origin (identity matrix)
+      pose_diff = np.eye(4)
+    else:
+      # T_diff = inv(T_prev) * T_curr
+      pose_diff = np.linalg.inv(prev_pose) @ curr_pose
+    
+    # 1. save as 4x4 matrix
+    filename = os.path.basename(pose_file)
+    np.savetxt(f'{diff_out_dir}/{filename}', pose_diff, fmt='%.6f')
+    
+    # 2. convert to 6D vector (x, y, z, roll, pitch, yaw)
+    translation = pose_diff[:3, 3]
+    rotation_matrix = pose_diff[:3, :3]
+    r = R.from_matrix(rotation_matrix)
+    euler_angles = r.as_euler('xyz', degrees=False)  # roll, pitch, yaw
+    pose_6d = np.concatenate([translation, euler_angles])
+    np.savetxt(f'{diff_6d_out_dir}/{filename}', pose_6d, fmt='%.6f')
+    
+    # update previous pose
+    prev_pose = curr_pose
 
 
 
