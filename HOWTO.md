@@ -15,4 +15,4 @@
 5. `cd mycuda`
 6. `rm -rf build/ *.so`
 7. `python3 setup.py build_ext --inplace`
-8. `python3 run_custom.py --mode run_video --video_dir /home/gavin/Documents/BundleSDF/damo_data/milk --out_folder /home/gavin/Documents/BundleSDF/damo_data/milk_results --use_gui 1 --debug_level 2`
+8. `python3 run_batch.py --mode run_video --video_dir /home/BundleSDF/demo/ironing/estimation_results --out_folder /home/BundleSDF/demo/ironing/bundlesdf --timeout 900 --use_gui 0`

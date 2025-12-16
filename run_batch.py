@@ -284,7 +284,7 @@ if __name__ == "__main__":
     parser.add_argument('--video_dir', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/milk")
     parser.add_argument('--out_folder', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/results_milk")
     parser.add_argument('--use_segmenter', type=int, default=0)
-    parser.add_argument('--use_gui', type=int, default=1)
+    parser.add_argument('--use_gui', type=int, default=0)
     parser.add_argument('--stride', type=int, default=1, help='interval of frames to run')
     parser.add_argument('--debug_level', type=int, default=2)
     parser.add_argument('--timeout', type=int, default=3600, help='Max seconds per video before skipping')
