@@ -10,8 +10,11 @@
 from bundlesdf import *
 import argparse
 import os, sys, glob
-import traceback  # Added for detailed error logging
-import copy # Added missing import usually required for deepcopy
+import traceback
+import copy
+import multiprocessing  # Added for timeout handling
+import time
+
 code_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(code_dir)
 from segmentation_utils import Segmenter
@@ -22,10 +25,11 @@ def run_one_video(video_dir, out_folder, use_segmenter=False, use_gui=False, str
     """
     Runs BundleSDF tracking on a single video sequence.
     """
+    # Re-seed inside the process to ensure consistency
+    set_seed(0)
+    
     print(f"--- Processing: {video_dir} ---")
     print(f"--- Outputting to: {out_folder} ---")
-    
-    set_seed(0)
 
     # Clean and create output directory
     os.system(f'rm -rf {out_folder} && mkdir -p {out_folder}')
@@ -112,18 +116,17 @@ def run_one_video(video_dir, out_folder, use_segmenter=False, use_gui=False, str
 
     tracker.on_finish()
 
-    # Pass specific video_dir to global nerf, not the root dir from args
+    # Pass specific video_dir to global nerf
     run_one_video_global_nerf(video_dir=video_dir, out_folder=out_folder)
 
 
 def run_one_video_global_nerf(video_dir, out_folder):
     """
     Runs the global NeRF refinement step.
-    IMPORTANT: Now accepts video_dir explicitly so it works in batch mode.
     """
     set_seed(0)
 
-    out_folder += '/'  # !NOTE there has to be a / in the end
+    out_folder += '/' 
 
     cfg_bundletrack = yaml.load(open(f"{out_folder}/config_bundletrack.yml", 'r'))
     cfg_bundletrack['debug_dir'] = out_folder
@@ -157,7 +160,6 @@ def run_one_video_global_nerf(video_dir, out_folder):
     cfg_nerf_dir = f"{cfg_nerf['datadir']}/config.yml"
     yaml.dump(cfg_nerf, open(cfg_nerf_dir, 'w'))
 
-    # Use the passed video_dir instead of args.video_dir (which is now the root)
     reader = YcbineoatReader(video_dir=video_dir, downscale=1)
 
     tracker = BundleSdf(cfg_track_dir=cfg_track_dir, cfg_nerf_dir=cfg_nerf_dir, start_nerf_keyframes=5)
@@ -171,13 +173,10 @@ def run_one_video_global_nerf(video_dir, out_folder):
 def postprocess_mesh(out_folder):
     mesh_files = sorted(glob.glob(f'{out_folder}/**/nerf/*normalized_space.obj', recursive=True))
     if not mesh_files:
-        print(f"No normalized_space.obj found in {out_folder}")
         return
 
     print(f"Using {mesh_files[-1]}")
     os.makedirs(f"{out_folder}/mesh/", exist_ok=True)
-
-    print(f"\nSaving meshes to {out_folder}/mesh/\n")
 
     mesh = trimesh.load(mesh_files[-1])
     with open(f'{os.path.dirname(mesh_files[-1])}/config.yml', 'r') as ff:
@@ -194,7 +193,6 @@ def postprocess_mesh(out_folder):
     best_component = None
     best_size = 0
     for component in components:
-        dists = np.linalg.norm(component.vertices, axis=-1)
         if len(component.vertices) > best_size:
             best_size = len(component.vertices)
             best_component = component
@@ -209,24 +207,19 @@ def postprocess_mesh(out_folder):
 
 def draw_pose(out_folder):
     K_path = f'{out_folder}/cam_K.txt'
-    if not os.path.exists(K_path):
-        print(f"Skipping draw_pose: {K_path} not found.")
-        return
-
+    if not os.path.exists(K_path): return
     K = np.loadtxt(K_path).reshape(3, 3)
+    
     color_files = sorted(glob.glob(f'{out_folder}/color/*'))
     mesh_path = f'{out_folder}/textured_mesh.obj'
-    
-    if not os.path.exists(mesh_path):
-        print(f"Skipping draw_pose: {mesh_path} not found.")
-        return
+    if not os.path.exists(mesh_path): return
 
     mesh = trimesh.load(mesh_path)
     to_origin, extents = trimesh.bounds.oriented_bounds(mesh)
     bbox = np.stack([-extents / 2, extents / 2], axis=0).reshape(2, 3)
     out_dir = f'{out_folder}/pose_vis'
     os.makedirs(out_dir, exist_ok=True)
-    logging.info(f"Saving to {out_dir}")
+    
     for color_file in color_files:
         color = imageio.imread(color_file)
         pose_path = color_file.replace('.png', '.txt').replace('color', 'ob_in_cam')
@@ -240,152 +233,134 @@ def draw_pose(out_folder):
 
 
 def extract_pose_diff(out_folder):
-    """
-    Reads absolute pose data, calculates relative pose differences between consecutive frames.
-    """
-    # defines path
     pose_dir = f'{out_folder}/ob_in_cam'
     diff_out_dir = f'{out_folder}/pose_diff'
     diff_6d_out_dir = f'{out_folder}/pose_diff_6d'
 
-    if not os.path.exists(pose_dir):
-        print(f"Skipping pose diff: {pose_dir} not found.")
-        return
+    if not os.path.exists(pose_dir): return
 
-    # create output directories
     os.makedirs(diff_out_dir, exist_ok=True)
     os.makedirs(diff_6d_out_dir, exist_ok=True)
-
-    # get sorted list of pose files
     pose_files = sorted(glob.glob(f'{pose_dir}/*.txt'))
-
-    print(f"Calculating pose differences and saving to {diff_out_dir} and {diff_6d_out_dir}")
 
     prev_pose = None
     for pose_file in pose_files:
-        # load current absolute pose (4x4 matrix)
         curr_pose = np.loadtxt(pose_file)
-
-        # calculate relative pose difference if previous pose exists
         if prev_pose is None:
-            # first frame, no previous pose -> origin (identity matrix)
             pose_diff = np.eye(4)
         else:
-            # T_diff = inv(T_prev) * T_curr
             pose_diff = np.linalg.inv(prev_pose) @ curr_pose
-
-        # 1. save as 4x4 matrix
+        
         filename = os.path.basename(pose_file)
         np.savetxt(f'{diff_out_dir}/{filename}', pose_diff, fmt='%.6f')
-
-        # 2. convert to 6D vector (x, y, z, roll, pitch, yaw)
+        
         translation = pose_diff[:3, 3]
         rotation_matrix = pose_diff[:3, :3]
         r = R.from_matrix(rotation_matrix)
-        euler_angles = r.as_euler('xyz', degrees=False)  # roll, pitch, yaw
+        euler_angles = r.as_euler('xyz', degrees=False)
         pose_6d = np.concatenate([translation, euler_angles])
         np.savetxt(f'{diff_6d_out_dir}/{filename}', pose_6d, fmt='%.6f')
-
-        # update previous pose
         prev_pose = curr_pose
 
 
+def wrapper_run_one_video(video_dir, out_folder, use_segmenter, use_gui, stride, debug_level):
+    """
+    Wrapper to handle exceptions inside the process so they are reported before the process dies.
+    """
+    try:
+        run_one_video(video_dir, out_folder, use_segmenter, use_gui, stride, debug_level)
+    except Exception as e:
+        print(f"Error in process for {video_dir}:")
+        traceback.print_exc()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
+    # Necessary for multiprocessing to work on some platforms
+    multiprocessing.set_start_method('spawn', force=True)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default="run_video", help="run_video/global_refine/draw_pose")
-    parser.add_argument('--video_dir', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/milk", 
-                        help="Root directory containing subfolders of videos")
-    parser.add_argument('--out_folder', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/results_milk",
-                        help="Root directory where output subfolders will be created")
+    parser.add_argument('--video_dir', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/milk")
+    parser.add_argument('--out_folder', type=str, default="/home/gavin/Documents/BundleSDF/demo_data/results_milk")
     parser.add_argument('--use_segmenter', type=int, default=0)
-    parser.add_argument('--use_gui', type=int, default=0)
-    parser.add_argument('--stride', type=int, default=1, help='interval of frames to run; 1 means using every frame')
-    parser.add_argument('--debug_level', type=int, default=2, help='higher means more logging')
+    parser.add_argument('--use_gui', type=int, default=1)
+    parser.add_argument('--stride', type=int, default=1, help='interval of frames to run')
+    parser.add_argument('--debug_level', type=int, default=2)
+    parser.add_argument('--timeout', type=int, default=3600, help='Max seconds per video before skipping')
     args = parser.parse_args()
 
-    # Get list of potential video directories
     if not os.path.exists(args.video_dir):
         print(f"Error: Input directory {args.video_dir} does not exist.")
         sys.exit(1)
 
-    # Detect if args.video_dir is a single video or a root folder
-    # We check if it contains a 'rgb' or 'color' folder directly
+    # Detect single video or batch directory
     is_single_video = os.path.exists(os.path.join(args.video_dir, 'rgb')) or \
                       os.path.exists(os.path.join(args.video_dir, 'color'))
 
     if is_single_video:
         video_dirs = [args.video_dir]
-        print(f"Detected single video input.")
     else:
-        # Assume it is a root directory containing multiple video subdirectories
         subdirs = sorted(os.listdir(args.video_dir))
         video_dirs = [os.path.join(args.video_dir, d) for d in subdirs if os.path.isdir(os.path.join(args.video_dir, d))]
         print(f"Detected batch input. Found {len(video_dirs)} directories.")
 
     if args.mode == 'run_video':
         for vid_path in video_dirs:
-            # Determine specific output folder name
             folder_name = os.path.basename(os.path.normpath(vid_path))
-            
-            # If running in batch mode, append folder name to out_root.
-            # If running single mode, user might have provided exact output path, but for consistency 
-            # with the request, let's treat out_folder as root if we are processing a list.
-            if is_single_video:
-                current_out = args.out_folder
-            else:
-                current_out = os.path.join(args.out_folder, folder_name)
+            current_out = args.out_folder if is_single_video else os.path.join(args.out_folder, folder_name)
 
-            try:
-                run_one_video(
-                    video_dir=vid_path, 
-                    out_folder=current_out, 
-                    use_segmenter=args.use_segmenter, 
-                    use_gui=args.use_gui,
-                    stride=args.stride,
-                    debug_level=args.debug_level
-                )
+            print(f"\n=======================================================")
+            print(f"Starting process for: {folder_name}")
+            print(f"Timeout set to: {args.timeout} seconds")
+            print(f"=======================================================\n")
+
+            # Create a separate process for the heavy lifting
+            p = multiprocessing.Process(
+                target=wrapper_run_one_video,
+                args=(vid_path, current_out, args.use_segmenter, args.use_gui, args.stride, args.debug_level)
+            )
+            
+            p.start()
+            
+            # Wait for the process to finish or timeout
+            p.join(timeout=args.timeout)
+
+            if p.is_alive():
+                print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                print(f"TIMEOUT REACHED ({args.timeout}s) for {folder_name}")
+                print(f"Killing process and skipping to next video...")
+                print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+                p.terminate()
+                # Give it a second to die gracefully, otherwise force kill
+                p.join(timeout=5)
+                if p.is_alive():
+                    p.kill()
+                    p.join()
                 
-                # Optional: Run post-processing utilities automatically after success
+                # Optional: Cleanup the failed output folder to save space/confusion
+                # os.system(f'rm -rf {current_out}') 
+            elif p.exitcode != 0:
+                 print(f"Process for {folder_name} failed with exit code {p.exitcode}. check logs above.")
+            else:
+                print(f"Process for {folder_name} finished successfully.")
+                # Run lightweight post-processing in the main process
                 extract_pose_diff(current_out)
-                
-            except Exception as e:
-                print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                print(f"CRITICAL ERROR processing {vid_path}")
-                print(f"Skipping this video and moving to the next.")
-                print(f"Error details:")
-                traceback.print_exc()
-                print(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-                continue
 
     elif args.mode == 'global_refine':
-        # Apply similar logic for global refine if needed in batch
+        # Similar logic for refine if needed, or keep simple if refine is fast
         for vid_path in video_dirs:
             folder_name = os.path.basename(os.path.normpath(vid_path))
-            if is_single_video:
-                current_out = args.out_folder
-            else:
-                current_out = os.path.join(args.out_folder, folder_name)
-
-            # In global_refine mode, out_folder must already exist
-            if not os.path.exists(current_out):
-                print(f"Skipping {current_out}, directory does not exist.")
-                continue
-
+            current_out = args.out_folder if is_single_video else os.path.join(args.out_folder, folder_name)
+            
+            if not os.path.exists(current_out): continue
             try:
-                # Note: run_one_video_global_refine needs the source video dir and result dir
                 run_one_video_global_nerf(video_dir=vid_path, out_folder=current_out)
-            except Exception as e:
-                print(f"Error refining {folder_name}: {e}")
+            except Exception:
                 traceback.print_exc()
 
     elif args.mode == 'draw_pose':
         for vid_path in video_dirs:
             folder_name = os.path.basename(os.path.normpath(vid_path))
-            if is_single_video:
-                current_out = args.out_folder
-            else:
-                current_out = os.path.join(args.out_folder, folder_name)
-            
+            current_out = args.out_folder if is_single_video else os.path.join(args.out_folder, folder_name)
             draw_pose(current_out)
-    else:
-        raise RuntimeError(f"Unknown mode: {args.mode}")
